@@ -25,7 +25,7 @@ class BotDashboard {
         add_action('wp_ajax_bot_blocker_activity', array($this, 'get_bot_activity'), 10);
         add_action('wp_ajax_bot_hostlookup', array($this, 'perform_host_lookup'), 10);
         
-        // Add bulk actions handler
+        // Add bulk actions handler - FIXED action name
         add_action('wp_ajax_bot_blocker_bulk_action', array($this, 'handle_bulk_action'), 10);
         
         // Debug handlers
@@ -49,7 +49,6 @@ class BotDashboard {
             referrer text,
             timestamp datetime NOT NULL,
             block_reason varchar(100) NOT NULL,
-            status tinyint(1) DEFAULT 1,
             hits int(11) DEFAULT 1,
             first_seen datetime DEFAULT NULL,
             last_seen datetime DEFAULT NULL,
@@ -58,7 +57,6 @@ class BotDashboard {
             PRIMARY KEY  (id),
             KEY ip_timestamp (ip_address, timestamp),
             KEY user_agent_key (user_agent(100)),
-            KEY status_key (status),
             KEY is_blocked (is_blocked),
             KEY last_seen (last_seen)
         ) $charset_collate;";
@@ -95,6 +93,11 @@ class BotDashboard {
             }
         }
         
+        // Remove status column if it exists (causing conflicts)
+        if (in_array('status', $existing_columns)) {
+            $wpdb->query("ALTER TABLE {$this->table_name} DROP COLUMN status");
+        }
+        
         // Update existing records
         $wpdb->query("UPDATE {$this->table_name} SET first_seen = timestamp WHERE first_seen IS NULL");
         $wpdb->query("UPDATE {$this->table_name} SET last_seen = timestamp WHERE last_seen IS NULL");
@@ -124,17 +127,12 @@ class BotDashboard {
             return;
         }
         
-        // Ensure jQuery is loaded
-        wp_enqueue_script('jquery');
-        wp_enqueue_script('jquery-ui-dialog');
-        wp_enqueue_style('wp-jquery-ui-dialog');
-        
-        // Enqueue our dashboard script
+        // Enqueue our dashboard script - VANILLA JS VERSION
         wp_enqueue_script(
             'bot-dashboard',
             plugin_dir_url(dirname(__FILE__)) . 'assets/bot-dashboard.js',
-            array('jquery', 'jquery-ui-dialog'),
-            '2.0.2', // Increment version to force reload
+            array(), // No jQuery dependency
+            '2.0.3', // Increment version to force reload
             true
         );
         
@@ -343,14 +341,14 @@ class BotDashboard {
                 echo '<div class="bot-actions">';
                 
                 if (!$activity->is_blocked) {
-                    echo '<a href="#" class="bot-action bot-action-ban" data-action="ban" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Ban this IP"></a>';
-                    echo '<a href="#" class="bot-action bot-action-warn" data-action="warn" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Warn this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-ban" data-bot-action="ban" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Ban this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-warn" data-bot-action="warn" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Warn this IP"></a>';
                 } else {
-                    echo '<a href="#" class="bot-action bot-action-restore" data-action="restore" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Restore this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-restore" data-bot-action="restore" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Restore this IP"></a>';
                 }
                 
-                echo '<a href="#" class="bot-action bot-action-whitelist" data-action="whitelist" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Whitelist this IP"></a>';
-                echo '<a href="#" class="bot-action bot-action-delete" data-action="delete" data-id="' . $activity->id . '" title="Delete this entry"></a>';
+                echo '<a href="#" class="bot-action bot-action-whitelist" data-bot-action="whitelist" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Whitelist this IP"></a>';
+                echo '<a href="#" class="bot-action bot-action-delete" data-bot-action="delete" data-id="' . $activity->id . '" title="Delete this entry"></a>';
                 
                 echo '<select class="bot-select-target">';
                 echo '<option value="ip">Target IP</option>';
@@ -412,7 +410,8 @@ class BotDashboard {
             return;
         }
         
-        $action = sanitize_text_field($_POST['action']);
+        // FIXED: Use bot_action instead of action to avoid conflicts
+        $bot_action = sanitize_text_field($_POST['bot_action']);
         $ip = sanitize_text_field($_POST['ip']);
         $id = intval($_POST['id']);
         
@@ -424,7 +423,7 @@ class BotDashboard {
         global $wpdb;
         
         try {
-            switch ($action) {
+            switch ($bot_action) {
                 case 'ban':
                     // Block the IP
                     $result = $wpdb->update(

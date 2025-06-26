@@ -109,7 +109,7 @@ class BotBlackhole {
                     array('%d')
                 );
             } else {
-                // Insert new traffic entry
+                // Insert new traffic entry - REMOVED status column
                 $wpdb->insert(
                     $this->table_name,
                     array(
@@ -122,11 +122,10 @@ class BotBlackhole {
                         'last_seen' => current_time('mysql'),
                         'block_reason' => $reason,
                         'blocked_reason' => $reason,
-                        'status' => 0, // 0 = monitoring
                         'is_blocked' => 0,
                         'hits' => 1
                     ),
-                    array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d')
+                    array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d')
                 );
             }
         } catch (Exception $e) {
@@ -146,7 +145,6 @@ class BotBlackhole {
             referrer text,
             timestamp datetime NOT NULL,
             block_reason varchar(100) NOT NULL,
-            status tinyint(1) DEFAULT 1,
             hits int(11) DEFAULT 1,
             first_seen datetime DEFAULT NULL,
             last_seen datetime DEFAULT NULL,
@@ -155,7 +153,6 @@ class BotBlackhole {
             PRIMARY KEY  (id),
             KEY ip_timestamp (ip_address, timestamp),
             KEY user_agent_key (user_agent(100)),
-            KEY status_key (status),
             KEY is_blocked (is_blocked),
             KEY last_seen (last_seen)
         ) $charset_collate;";
@@ -202,6 +199,11 @@ class BotBlackhole {
                     error_log("Failed to add column {$column} to {$this->table_name}: " . $wpdb->last_error);
                 }
             }
+        }
+        
+        // Remove status column if it exists (causing conflicts)
+        if (in_array('status', $existing_columns)) {
+            $wpdb->query("ALTER TABLE {$this->table_name} DROP COLUMN status");
         }
         
         // Update existing records to populate new columns
@@ -529,11 +531,10 @@ class BotBlackhole {
                     'last_seen' => current_time('mysql'),
                     'block_reason' => $reason,
                     'blocked_reason' => $reason,
-                    'status' => 0, // 0 = suspicious, 1 = blocked
                     'is_blocked' => 0,
                     'hits' => 1
                 ),
-                array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d')
+                array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d')
             );
         } catch (Exception $e) {
             error_log('Bot Blackhole Log Error: ' . $e->getMessage());
@@ -569,7 +570,7 @@ class BotBlackhole {
             // Check if this IP was already blocked recently
             $existing = $wpdb->get_row($wpdb->prepare(
                 "SELECT id, hits FROM {$this->table_name} 
-                 WHERE ip_address = %s AND status = 1 
+                 WHERE ip_address = %s AND is_blocked = 1 
                  AND timestamp > DATE_SUB(NOW(), INTERVAL 1 HOUR)
                  ORDER BY timestamp DESC LIMIT 1",
                 $ip
@@ -589,7 +590,7 @@ class BotBlackhole {
                     array('%d')
                 );
             } else {
-                // Insert new record
+                // Insert new record - REMOVED status column
                 $wpdb->insert(
                     $this->table_name,
                     array(
@@ -602,11 +603,10 @@ class BotBlackhole {
                         'last_seen' => current_time('mysql'),
                         'block_reason' => $reason,
                         'blocked_reason' => $reason,
-                        'status' => 1,
                         'is_blocked' => 1,
                         'hits' => 1
                     ),
-                    array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d')
+                    array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d')
                 );
             }
         } catch (Exception $e) {
@@ -630,6 +630,12 @@ class BotBlackhole {
     }
     
     private function block_bot($reason) {
+        // Check if headers have already been sent
+        if (headers_sent()) {
+            // If headers are sent, just exit
+            exit;
+        }
+        
         $status_code = $this->get_option('security_bot_block_status', 403);
         $message = $this->get_option('security_bot_block_message', 'Access Denied');
         
