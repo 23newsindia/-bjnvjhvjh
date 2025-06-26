@@ -7,25 +7,100 @@ if (!defined('ABSPATH')) {
 
 class BotDashboard {
     private $bot_protection;
+    private $table_name;
     
     public function __construct($bot_protection) {
         $this->bot_protection = $bot_protection;
+        global $wpdb;
+        $this->table_name = $wpdb->prefix . 'security_blocked_bots';
     }
     
     public function init() {
         add_action('admin_menu', array($this, 'add_dashboard_page'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_dashboard_scripts'));
         
-        // Add AJAX handlers - these need to be registered properly
-        add_action('wp_ajax_bot_blocker_stats', array($this, 'get_bot_stats'));
-        add_action('wp_ajax_bot_blocker_unblock', array($this, 'unblock_bot'));
-        add_action('wp_ajax_bot_blocker_activity', array($this, 'get_bot_activity'));
-        add_action('wp_ajax_bot_hostlookup', array($this, 'perform_host_lookup'));
+        // Add AJAX handlers with proper priority
+        add_action('wp_ajax_bot_blocker_stats', array($this, 'get_bot_stats'), 10);
+        add_action('wp_ajax_bot_blocker_unblock', array($this, 'unblock_bot'), 10);
+        add_action('wp_ajax_bot_blocker_activity', array($this, 'get_bot_activity'), 10);
+        add_action('wp_ajax_bot_hostlookup', array($this, 'perform_host_lookup'), 10);
         
-        // Also add nopriv handlers for debugging (remove in production)
+        // Add bulk actions handler
+        add_action('wp_ajax_bot_blocker_bulk_action', array($this, 'handle_bulk_action'), 10);
+        
+        // Debug handlers
         add_action('wp_ajax_nopriv_bot_blocker_stats', array($this, 'handle_unauthorized_request'));
         add_action('wp_ajax_nopriv_bot_blocker_unblock', array($this, 'handle_unauthorized_request'));
         add_action('wp_ajax_nopriv_bot_blocker_activity', array($this, 'handle_unauthorized_request'));
+        
+        // Ensure table exists
+        add_action('admin_init', array($this, 'ensure_table_exists'));
+    }
+    
+    public function ensure_table_exists() {
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE IF NOT EXISTS {$this->table_name} (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            ip_address varchar(45) NOT NULL,
+            user_agent text NOT NULL,
+            request_uri text NOT NULL,
+            referrer text,
+            timestamp datetime NOT NULL,
+            block_reason varchar(100) NOT NULL,
+            status tinyint(1) DEFAULT 1,
+            hits int(11) DEFAULT 1,
+            first_seen datetime DEFAULT NULL,
+            last_seen datetime DEFAULT NULL,
+            is_blocked tinyint(1) DEFAULT 1,
+            blocked_reason varchar(100) DEFAULT NULL,
+            PRIMARY KEY  (id),
+            KEY ip_timestamp (ip_address, timestamp),
+            KEY user_agent_key (user_agent(100)),
+            KEY status_key (status),
+            KEY is_blocked (is_blocked),
+            KEY last_seen (last_seen)
+        ) $charset_collate;";
+
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+        
+        // Update existing records to have the new columns
+        $this->update_table_structure();
+    }
+    
+    private function update_table_structure() {
+        global $wpdb;
+        
+        // Get current table structure
+        $columns = $wpdb->get_results("SHOW COLUMNS FROM {$this->table_name}");
+        $existing_columns = array();
+        foreach ($columns as $column) {
+            $existing_columns[] = $column->Field;
+        }
+        
+        // Add missing columns if they don't exist
+        $columns_to_add = array(
+            'hits' => 'ADD COLUMN hits int(11) DEFAULT 1',
+            'first_seen' => 'ADD COLUMN first_seen datetime DEFAULT NULL',
+            'last_seen' => 'ADD COLUMN last_seen datetime DEFAULT NULL', 
+            'is_blocked' => 'ADD COLUMN is_blocked tinyint(1) DEFAULT 1',
+            'blocked_reason' => 'ADD COLUMN blocked_reason varchar(100) DEFAULT NULL'
+        );
+        
+        foreach ($columns_to_add as $column => $sql) {
+            if (!in_array($column, $existing_columns)) {
+                $wpdb->query("ALTER TABLE {$this->table_name} {$sql}");
+            }
+        }
+        
+        // Update existing records
+        $wpdb->query("UPDATE {$this->table_name} SET first_seen = timestamp WHERE first_seen IS NULL");
+        $wpdb->query("UPDATE {$this->table_name} SET last_seen = timestamp WHERE last_seen IS NULL");
+        $wpdb->query("UPDATE {$this->table_name} SET blocked_reason = block_reason WHERE blocked_reason IS NULL");
+        $wpdb->query("UPDATE {$this->table_name} SET hits = 1 WHERE hits IS NULL OR hits = 0");
+        $wpdb->query("UPDATE {$this->table_name} SET is_blocked = 1 WHERE is_blocked IS NULL");
     }
     
     public function handle_unauthorized_request() {
@@ -59,7 +134,7 @@ class BotDashboard {
             'bot-dashboard',
             plugin_dir_url(dirname(__FILE__)) . 'assets/bot-dashboard.js',
             array('jquery', 'jquery-ui-dialog'),
-            '2.0.1', // Increment version to force reload
+            '2.0.2', // Increment version to force reload
             true
         );
         
@@ -68,6 +143,7 @@ class BotDashboard {
             'ajaxurl' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('security_bot_stats'),
             'unblock_nonce' => wp_create_nonce('security_bot_unblock'),
+            'bulk_nonce' => wp_create_nonce('security_bot_bulk'),
             'debug' => defined('WP_DEBUG') && WP_DEBUG
         ));
         
@@ -76,7 +152,7 @@ class BotDashboard {
             'bot-dashboard',
             plugin_dir_url(dirname(__FILE__)) . 'assets/bot-dashboard.css',
             array(),
-            '2.0.1'
+            '2.0.2'
         );
     }
     
@@ -95,16 +171,12 @@ class BotDashboard {
         
         try {
             global $wpdb;
-            $table_name = $wpdb->prefix . 'security_blocked_bots';
             
             // Check if table exists
-            $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name;
+            $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->table_name}'") === $this->table_name;
             
             if (!$table_exists) {
-                // Try to create the table
-                if ($this->bot_protection && method_exists($this->bot_protection, 'ensure_table_exists')) {
-                    $this->bot_protection->ensure_table_exists();
-                }
+                $this->ensure_table_exists();
                 
                 // Return default stats if table still doesn't exist
                 $stats = array(
@@ -119,10 +191,10 @@ class BotDashboard {
             
             // Get stats from database
             $stats = array(
-                'total_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table_name} WHERE is_blocked = 1"),
-                'today_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table_name} WHERE is_blocked = 1 AND DATE(last_seen) = CURDATE()"),
-                'week_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table_name} WHERE is_blocked = 1 AND last_seen >= DATE_SUB(NOW(), INTERVAL 7 DAY)"),
-                'top_blocked_ips' => $wpdb->get_results("SELECT ip_address, SUM(hits) as hits FROM {$table_name} WHERE is_blocked = 1 GROUP BY ip_address ORDER BY hits DESC LIMIT 10", ARRAY_A)
+                'total_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$this->table_name} WHERE is_blocked = 1"),
+                'today_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$this->table_name} WHERE is_blocked = 1 AND DATE(last_seen) = CURDATE()"),
+                'week_blocked' => (int)$wpdb->get_var("SELECT COUNT(*) FROM {$this->table_name} WHERE is_blocked = 1 AND last_seen >= DATE_SUB(NOW(), INTERVAL 7 DAY)"),
+                'top_blocked_ips' => $wpdb->get_results("SELECT ip_address, SUM(hits) as hits FROM {$this->table_name} WHERE is_blocked = 1 GROUP BY ip_address ORDER BY hits DESC LIMIT 10", ARRAY_A)
             );
             
             // Ensure top_blocked_ips is an array
@@ -153,7 +225,6 @@ class BotDashboard {
         
         try {
             global $wpdb;
-            $table_name = $wpdb->prefix . 'security_blocked_bots';
             
             // Get parameters
             $limit = intval($_POST['limit']) ?: 10;
@@ -189,7 +260,7 @@ class BotDashboard {
             }
             
             // Get total count
-            $count_query = "SELECT COUNT(*) FROM {$table_name} {$where_clause}";
+            $count_query = "SELECT COUNT(*) FROM {$this->table_name} {$where_clause}";
             if (!empty($where_params)) {
                 $total_count = $wpdb->get_var($wpdb->prepare($count_query, $where_params));
             } else {
@@ -197,13 +268,13 @@ class BotDashboard {
             }
             
             // Get activity data
-            $activity_query = "SELECT * FROM {$table_name} {$where_clause} ORDER BY {$sort} {$order} LIMIT %d OFFSET %d";
+            $activity_query = "SELECT * FROM {$this->table_name} {$where_clause} ORDER BY {$sort} {$order} LIMIT %d OFFSET %d";
             $query_params = array_merge($where_params, array($limit, $offset));
             
             if (!empty($where_params)) {
                 $activities = $wpdb->get_results($wpdb->prepare($activity_query, $query_params));
             } else {
-                $activities = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table_name} ORDER BY {$sort} {$order} LIMIT %d OFFSET %d", $limit, $offset));
+                $activities = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->table_name} ORDER BY {$sort} {$order} LIMIT %d OFFSET %d", $limit, $offset));
             }
             
             // Generate HTML response
@@ -272,13 +343,13 @@ class BotDashboard {
                 echo '<div class="bot-actions">';
                 
                 if (!$activity->is_blocked) {
-                    echo '<a href="#" class="bot-action bot-action-ban" data-action="ban" data-id="' . $activity->id . '" title="Ban this IP"></a>';
-                    echo '<a href="#" class="bot-action bot-action-warn" data-action="warn" data-id="' . $activity->id . '" title="Warn this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-ban" data-action="ban" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Ban this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-warn" data-action="warn" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Warn this IP"></a>';
                 } else {
-                    echo '<a href="#" class="bot-action bot-action-restore" data-action="restore" data-id="' . $activity->id . '" title="Restore this IP"></a>';
+                    echo '<a href="#" class="bot-action bot-action-restore" data-action="restore" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Restore this IP"></a>';
                 }
                 
-                echo '<a href="#" class="bot-action bot-action-whitelist" data-action="whitelist" data-id="' . $activity->id . '" title="Whitelist this IP"></a>';
+                echo '<a href="#" class="bot-action bot-action-whitelist" data-action="whitelist" data-id="' . $activity->id . '" data-ip="' . esc_attr($activity->ip_address) . '" title="Whitelist this IP"></a>';
                 echo '<a href="#" class="bot-action bot-action-delete" data-action="delete" data-id="' . $activity->id . '" title="Delete this entry"></a>';
                 
                 echo '<select class="bot-select-target">';
@@ -328,6 +399,128 @@ class BotDashboard {
         return ob_get_clean();
     }
     
+    public function handle_bulk_action() {
+        // Verify nonce
+        if (!check_ajax_referer('security_bot_bulk', 'nonce', false)) {
+            wp_send_json_error('Invalid nonce');
+            return;
+        }
+        
+        // Check user capabilities
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+            return;
+        }
+        
+        $action = sanitize_text_field($_POST['action']);
+        $ip = sanitize_text_field($_POST['ip']);
+        $id = intval($_POST['id']);
+        
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            wp_send_json_error('Invalid IP address');
+            return;
+        }
+        
+        global $wpdb;
+        
+        try {
+            switch ($action) {
+                case 'ban':
+                    // Block the IP
+                    $result = $wpdb->update(
+                        $this->table_name,
+                        array('is_blocked' => 1, 'blocked_reason' => 'Manually blocked'),
+                        array('ip_address' => $ip),
+                        array('%d', '%s'),
+                        array('%s')
+                    );
+                    
+                    if ($result !== false) {
+                        // Also add to transient cache for immediate blocking
+                        $blocked_transient = 'bot_blocked_' . md5($ip);
+                        set_transient($blocked_transient, true, 24 * HOUR_IN_SECONDS);
+                        
+                        wp_send_json_success('IP banned successfully');
+                    } else {
+                        wp_send_json_error('Failed to ban IP');
+                    }
+                    break;
+                    
+                case 'restore':
+                    // Unblock the IP
+                    $result = $wpdb->update(
+                        $this->table_name,
+                        array('is_blocked' => 0, 'blocked_reason' => 'Manually restored'),
+                        array('ip_address' => $ip),
+                        array('%d', '%s'),
+                        array('%s')
+                    );
+                    
+                    if ($result !== false) {
+                        // Remove from transient cache
+                        $blocked_transient = 'bot_blocked_' . md5($ip);
+                        delete_transient($blocked_transient);
+                        
+                        wp_send_json_success('IP restored successfully');
+                    } else {
+                        wp_send_json_error('Failed to restore IP');
+                    }
+                    break;
+                    
+                case 'whitelist':
+                    // Add to whitelist
+                    $current_whitelist = get_option('security_bot_whitelist_ips', '');
+                    $whitelist_array = array_filter(array_map('trim', explode("\n", $current_whitelist)));
+                    
+                    if (!in_array($ip, $whitelist_array)) {
+                        $whitelist_array[] = $ip;
+                        $new_whitelist = implode("\n", $whitelist_array);
+                        update_option('security_bot_whitelist_ips', $new_whitelist);
+                        
+                        // Also unblock the IP
+                        $wpdb->update(
+                            $this->table_name,
+                            array('is_blocked' => 0, 'blocked_reason' => 'Whitelisted'),
+                            array('ip_address' => $ip),
+                            array('%d', '%s'),
+                            array('%s')
+                        );
+                        
+                        // Remove from transient cache
+                        $blocked_transient = 'bot_blocked_' . md5($ip);
+                        delete_transient($blocked_transient);
+                        
+                        wp_send_json_success('IP whitelisted successfully');
+                    } else {
+                        wp_send_json_error('IP already whitelisted');
+                    }
+                    break;
+                    
+                case 'delete':
+                    // Delete the entry
+                    $result = $wpdb->delete(
+                        $this->table_name,
+                        array('id' => $id),
+                        array('%d')
+                    );
+                    
+                    if ($result !== false) {
+                        wp_send_json_success('Entry deleted successfully');
+                    } else {
+                        wp_send_json_error('Failed to delete entry');
+                    }
+                    break;
+                    
+                default:
+                    wp_send_json_error('Invalid action');
+            }
+            
+        } catch (Exception $e) {
+            error_log('Bot Dashboard Bulk Action Error: ' . $e->getMessage());
+            wp_send_json_error('Database error: ' . $e->getMessage());
+        }
+    }
+    
     public function unblock_bot() {
         // Verify nonce
         if (!check_ajax_referer('security_bot_unblock', 'nonce', false)) {
@@ -357,18 +550,17 @@ class BotDashboard {
         
         try {
             global $wpdb;
-            $table_name = $wpdb->prefix . 'security_blocked_bots';
             
             // Update database
             $result = $wpdb->update(
-                $table_name,
+                $this->table_name,
                 array('is_blocked' => 0),
                 array('ip_address' => $ip),
                 array('%d'),
                 array('%s')
             );
             
-            // Also remove from transient cache if using BotBlackhole
+            // Also remove from transient cache
             $blocked_transient = 'bot_blocked_' . md5($ip);
             delete_transient($blocked_transient);
             
@@ -425,13 +617,9 @@ class BotDashboard {
         $recent_activity = array();
         
         try {
-            if ($this->bot_protection && method_exists($this->bot_protection, 'get_blocked_bots')) {
-                $blocked_bots = $this->bot_protection->get_blocked_bots(20);
-            }
-            
-            if ($this->bot_protection && method_exists($this->bot_protection, 'get_bot_activity')) {
-                $recent_activity = $this->bot_protection->get_bot_activity(30);
-            }
+            global $wpdb;
+            $blocked_bots = $wpdb->get_results("SELECT * FROM {$this->table_name} WHERE is_blocked = 1 ORDER BY last_seen DESC LIMIT 20");
+            $recent_activity = $wpdb->get_results("SELECT * FROM {$this->table_name} ORDER BY last_seen DESC LIMIT 30");
         } catch (Exception $e) {
             error_log('Bot Dashboard Render Error: ' . $e->getMessage());
         }

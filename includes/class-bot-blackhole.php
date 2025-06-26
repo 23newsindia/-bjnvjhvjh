@@ -60,6 +60,78 @@ class BotBlackhole {
         // Schedule cleanup
         add_action('admin_init', array($this, 'schedule_cleanup'));
         add_action('bot_blackhole_cleanup', array($this, 'cleanup_logs'));
+        
+        // Add live traffic capture
+        if (!self::$is_admin) {
+            add_action('wp', array($this, 'capture_live_traffic'), 1);
+        }
+    }
+    
+    public function capture_live_traffic() {
+        // Skip for admin users and logged-in users if configured
+        if (current_user_can('manage_options') || 
+            (is_user_logged_in() && $this->get_option('security_bot_skip_logged_users', true))) {
+            return;
+        }
+        
+        $ip = $this->get_client_ip();
+        $user_agent = $this->get_user_agent();
+        $request_uri = $_SERVER['REQUEST_URI'];
+        
+        // Log all traffic for monitoring
+        $this->log_traffic($ip, $user_agent, $request_uri, 'Live Traffic');
+    }
+    
+    private function log_traffic($ip, $user_agent, $request_uri, $reason) {
+        global $wpdb;
+        
+        try {
+            // Check if this IP already exists in recent traffic
+            $existing = $wpdb->get_row($wpdb->prepare(
+                "SELECT id, hits FROM {$this->table_name} 
+                 WHERE ip_address = %s AND is_blocked = 0 
+                 AND timestamp > DATE_SUB(NOW(), INTERVAL 1 HOUR)
+                 ORDER BY timestamp DESC LIMIT 1",
+                $ip
+            ));
+            
+            if ($existing) {
+                // Update hit count for existing entry
+                $wpdb->update(
+                    $this->table_name,
+                    array(
+                        'hits' => $existing->hits + 1, 
+                        'timestamp' => current_time('mysql'),
+                        'last_seen' => current_time('mysql')
+                    ),
+                    array('id' => $existing->id),
+                    array('%d', '%s', '%s'),
+                    array('%d')
+                );
+            } else {
+                // Insert new traffic entry
+                $wpdb->insert(
+                    $this->table_name,
+                    array(
+                        'ip_address' => $ip,
+                        'user_agent' => $user_agent,
+                        'request_uri' => $request_uri,
+                        'referrer' => isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '',
+                        'timestamp' => current_time('mysql'),
+                        'first_seen' => current_time('mysql'),
+                        'last_seen' => current_time('mysql'),
+                        'block_reason' => $reason,
+                        'blocked_reason' => $reason,
+                        'status' => 0, // 0 = monitoring
+                        'is_blocked' => 0,
+                        'hits' => 1
+                    ),
+                    array('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d')
+                );
+            }
+        } catch (Exception $e) {
+            error_log('Bot Blackhole Traffic Log Error: ' . $e->getMessage());
+        }
     }
     
     public function ensure_table_exists() {

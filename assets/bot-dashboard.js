@@ -1,5 +1,5 @@
 /* 
-	Enhanced Bot Dashboard JS v2.0
+	Enhanced Bot Dashboard JS v2.0.2
 	Modern Ajax-powered bot protection interface
 */
 
@@ -26,6 +26,7 @@ jQuery(document).ready(function($) {
 			fx: 1,
 			nonce: window.botDashboard ? window.botDashboard.nonce : '',
 			unblock_nonce: window.botDashboard ? window.botDashboard.unblock_nonce : '',
+			bulk_nonce: window.botDashboard ? window.botDashboard.bulk_nonce : '',
 			ajaxurl: window.botDashboard ? window.botDashboard.ajaxurl : ajaxurl,
 			debug: window.botDashboard ? window.botDashboard.debug : false,
 			dots: '<span class="bot-loading-dots">Loading</span>'
@@ -220,26 +221,87 @@ jQuery(document).ready(function($) {
 		$(this).blur();
 	});
 	
-	// Individual actions (Ban, Warn, Restore, etc.)
-	$(document).on('click', '.bot-action-ban, .bot-action-warn, .bot-action-restore, .bot-action-whitelist', function(e) {
+	// Individual actions (Ban, Warn, Restore, etc.) - FIXED
+	$(document).on('click', '.bot-action-ban, .bot-action-warn, .bot-action-restore, .bot-action-whitelist, .bot-action-delete', function(e) {
 		e.preventDefault();
-		var fx = botDashboard.vars.fx;
-		var target = $(this).siblings('.bot-select-target').val() || 'ip';
-		var action = $(this).data('action');
-		var bulk = action + '-' + target;
-		var id = $(this).data('id');
-		var items = [];
-		items.push(id);
 		
-		botDashboard.vars.bulk = bulk;
-		botDashboard.vars.items = items;
-		botDashboard.vars.type = 'bulk';
+		var $this = $(this);
+		var action = $this.data('action');
+		var id = $this.data('id');
+		var ip = $this.data('ip');
 		
-		if (fx === 1) {
-			playSound(action);
+		debugLog('Action clicked:', {action: action, id: id, ip: ip});
+		
+		if (!action || !id) {
+			showError('Missing action or ID data');
+			return;
 		}
 		
-		loadBotActivity();
+		// Confirm action
+		var actionText = action.charAt(0).toUpperCase() + action.slice(1);
+		if (!confirm('Are you sure you want to ' + actionText + ' this IP: ' + ip + '?')) {
+			return;
+		}
+		
+		// Disable button during request
+		$this.prop('disabled', true).addClass('processing');
+		
+		// Perform bulk action via AJAX
+		$.ajax({
+			url: botDashboard.vars.ajaxurl,
+			type: 'POST',
+			dataType: 'json',
+			data: {
+				action: 'bot_blocker_bulk_action',
+				nonce: botDashboard.vars.bulk_nonce,
+				action: action,
+				id: id,
+				ip: ip
+			},
+			success: function(response) {
+				debugLog('Bulk action response:', response);
+				
+				$this.prop('disabled', false).removeClass('processing');
+				
+				if (response && response.success) {
+					showNotice(response.data, 'success');
+					
+					// Play sound effect
+					if (botDashboard.vars.fx === 1) {
+						playSound(action);
+					}
+					
+					// Reload activity to show changes
+					loadBotActivity();
+					loadBotStats();
+				} else {
+					var errorMsg = response && response.data ? response.data : 'Unknown error';
+					showNotice('Failed to ' + actionText + ': ' + errorMsg, 'error');
+				}
+			},
+			error: function(xhr, status, error) {
+				debugLog('Bulk action AJAX error:', {xhr: xhr, status: status, error: error});
+				
+				$this.prop('disabled', false).removeClass('processing');
+				
+				var errorMsg = 'Error occurred while performing action';
+				if (xhr.responseText) {
+					try {
+						var response = JSON.parse(xhr.responseText);
+						if (response.data) {
+							errorMsg += ': ' + response.data;
+						}
+					} catch (e) {
+						errorMsg += ': ' + error;
+					}
+				} else {
+					errorMsg += ': ' + error;
+				}
+				
+				showNotice(errorMsg, 'error');
+			}
+		});
+		
 		$(this).blur();
 	});
 	
