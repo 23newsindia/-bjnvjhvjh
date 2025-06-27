@@ -8,6 +8,8 @@ if (!defined('ABSPATH')) {
 class FeatureManager {
     private $excluded_paths_cache = null;
     private static $is_admin = null;
+    private static $is_logged_in = null;
+    private static $current_user_can_manage = null;
     private $options_cache = array();
     
     private function get_option($key, $default = false) {
@@ -18,13 +20,21 @@ class FeatureManager {
     }
 
     public function init() {
-        // Initialize is_admin check once
+        // Initialize static checks once for performance
         if (self::$is_admin === null) {
             self::$is_admin = is_admin();
         }
+        
+        if (self::$is_logged_in === null) {
+            self::$is_logged_in = is_user_logged_in();
+        }
+        
+        if (self::$current_user_can_manage === null) {
+            self::$current_user_can_manage = current_user_can('manage_options');
+        }
 
         // Only load features if needed
-        if (!self::$is_admin) {
+        if (!self::$is_admin && !self::$current_user_can_manage) {
             $this->manage_url_security();
             $this->manage_php_access();
             
@@ -88,12 +98,8 @@ class FeatureManager {
     }
 
     public function remove_query_strings() {
-        if (self::$is_admin || empty($_SERVER['QUERY_STRING'])) {
-            return;
-        }
-
-        // Always allow for logged-in users
-        if (is_user_logged_in()) {
+        // CRITICAL: Skip for logged-in users and admins
+        if (self::$is_admin || self::$is_logged_in || self::$current_user_can_manage || empty($_SERVER['QUERY_STRING'])) {
             return;
         }
 
@@ -276,7 +282,7 @@ class FeatureManager {
     }
 
     private function manage_php_access() {
-        if (!self::$is_admin) {
+        if (!self::$is_admin && !self::$current_user_can_manage) {
             add_action('init', array($this, 'block_direct_php_access'));
         }
     }
@@ -300,7 +306,7 @@ class FeatureManager {
     }
 
     private function manage_url_security() {
-        if (!self::$is_admin) {
+        if (!self::$is_admin && !self::$current_user_can_manage) {
             add_action('init', array($this, 'check_url_security'));
         }
     }

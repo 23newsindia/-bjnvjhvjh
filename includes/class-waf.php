@@ -8,6 +8,8 @@ class SecurityWAF {
     private $patterns_cache = array();
     private $input_cache = null;
     private $table_name;
+    private static $is_logged_in = null;
+    private static $current_user_can_manage = null;
     
     public function __construct() {
         if (!get_option('security_enable_waf', true)) {
@@ -16,6 +18,15 @@ class SecurityWAF {
         
         global $wpdb;
         $this->table_name = $wpdb->prefix . 'security_waf_logs';
+        
+        // Initialize static checks once for performance
+        if (self::$is_logged_in === null) {
+            self::$is_logged_in = is_user_logged_in();
+        }
+        
+        if (self::$current_user_can_manage === null) {
+            self::$current_user_can_manage = current_user_can('manage_options');
+        }
         
         // Cache settings on instantiation
         $this->request_limit = (int)get_option('security_waf_request_limit', 100);
@@ -69,6 +80,11 @@ class SecurityWAF {
     }
 
     public function waf_check() {
+        // CRITICAL: Skip all checks for logged-in users and admins - FIRST CHECK
+        if (self::$is_logged_in || self::$current_user_can_manage) {
+            return;
+        }
+        
         // Allow WordPress core functionality
         if ($this->is_wordpress_core_request()) {
             return;
@@ -112,13 +128,18 @@ class SecurityWAF {
             );
             return in_array($_POST['action'], $allowed_actions);
         }
+        
+        // Allow WooCommerce AJAX requests
+        if (strpos($_SERVER['REQUEST_URI'], 'wc-ajax=') !== false) {
+            return true;
+        }
 
         return false;
     }
 
     private function is_rate_limited($ip) {
         // Skip rate limiting for authenticated users
-        if (is_user_logged_in()) {
+        if (self::$is_logged_in) {
             return false;
         }
         

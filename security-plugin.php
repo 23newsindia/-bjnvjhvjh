@@ -2,7 +2,7 @@
 /*
 Plugin Name: Enhanced Security Plugin
 Description: Comprehensive security plugin with URL exclusion, blocking, SEO features, anti-spam protection, and bot protection
-Version: 2.5
+Version: 2.6
 Author: Your Name
 */
 
@@ -36,8 +36,24 @@ class CustomSecurityPlugin {
     private $bot_dashboard;
     private $bot_settings;
     private $settings;
+    private static $is_admin = null;
+    private static $is_logged_in = null;
+    private static $current_user_can_manage = null;
     
     public function __construct() {
+        // Initialize static checks once for performance
+        if (self::$is_admin === null) {
+            self::$is_admin = is_admin();
+        }
+        
+        if (self::$is_logged_in === null) {
+            self::$is_logged_in = is_user_logged_in();
+        }
+        
+        if (self::$current_user_can_manage === null) {
+            self::$current_user_can_manage = current_user_can('manage_options');
+        }
+        
         // Hook into WordPress initialization
         add_action('plugins_loaded', array($this, 'init_components'), 1);
         
@@ -60,7 +76,7 @@ class CustomSecurityPlugin {
     }
 
     public function debug_notice() {
-        if (current_user_can('manage_options') && isset($_GET['page']) && $_GET['page'] === 'security-bot-dashboard') {
+        if (self::$current_user_can_manage && isset($_GET['page']) && $_GET['page'] === 'security-bot-dashboard') {
             global $wpdb;
             $table_name = $wpdb->prefix . 'security_blocked_bots';
             $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name;
@@ -89,7 +105,7 @@ class CustomSecurityPlugin {
 
     public function check_database_updates() {
         $db_version = get_option('security_plugin_db_version', '1.0');
-        $current_version = '2.5';
+        $current_version = '2.6';
         
         if (version_compare($db_version, $current_version, '<')) {
             $this->force_create_tables();
@@ -140,7 +156,7 @@ class CustomSecurityPlugin {
             'security_protect_login' => false,
             'security_bot_whitelist_ips' => '',
             'security_bot_whitelist_agents' => $this->get_default_whitelist_bots(),
-            'security_plugin_db_version' => '2.5'
+            'security_plugin_db_version' => '2.6'
         );
 
         foreach ($default_options as $option => $value) {
@@ -199,8 +215,8 @@ wordfence';
 
     public function init_components() {
         // Initialize components based on context
-        if (!is_admin()) {
-            // Frontend components
+        if (!self::$is_admin && !self::$current_user_can_manage) {
+            // Frontend components - only for non-admin users
             if (get_option('security_enable_xss', true)) {
                 $this->headers = new SecurityHeaders();
                 add_action('init', array($this->headers, 'add_security_headers'));
@@ -235,7 +251,7 @@ wordfence';
         }
         
         // Admin components
-        if (is_admin()) {
+        if (self::$is_admin) {
             $this->settings = new SecuritySettings();
             add_action('admin_menu', array($this->settings, 'add_admin_menu'));
             add_action('admin_init', array($this->settings, 'register_settings'));

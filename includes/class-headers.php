@@ -1,6 +1,19 @@
 <?php
 class SecurityHeaders {
     private static $headers_sent = false;
+    private static $is_logged_in = null;
+    private static $current_user_can_manage = null;
+    
+    public function __construct() {
+        // Initialize static checks once for performance
+        if (self::$is_logged_in === null) {
+            self::$is_logged_in = is_user_logged_in();
+        }
+        
+        if (self::$current_user_can_manage === null) {
+            self::$current_user_can_manage = current_user_can('manage_options');
+        }
+    }
     
     public function add_security_headers() {
         if (self::$headers_sent || headers_sent() || !get_option('security_enable_xss', true)) {
